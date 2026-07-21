@@ -10,9 +10,17 @@ os.environ.setdefault("AI_CORE_OBSERVABILITY_BACKEND", "none")
 def test_imports_and_public_api():
     import ai_core
 
-    for name in ("get_llm", "traced", "record_score", "Evaluator", "EvalResult",
-                 "NonEmpty", "JsonFormat", "Groundedness"):
+    for name in ("get_llm", "traced", "record_score", "record_generation",
+                 "Evaluator", "EvalResult", "NonEmpty", "JsonFormat", "Groundedness"):
         assert hasattr(ai_core, name)
+
+
+def test_record_generation_noop_when_backend_none():
+    from ai_core import record_generation
+
+    # backend=none -> nie rzuca, po prostu nic nie wysyła
+    record_generation(name="t", model="x", input="in", output="out",
+                      usage={"input": 10, "output": 20})
 
 
 def test_model_alias_resolution():

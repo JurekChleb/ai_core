@@ -1,6 +1,6 @@
 [project]
 name = "ai-core"
-version = "0.1.0"
+version = "0.2.0"
 description = "Wspólna biblioteka AI: LiteLLM + obserwowalność (Langfuse/Opik) + evaluatory"
 requires-python = ">=3.11"
 dependencies = [

@@ -137,4 +137,60 @@ def record_score(
         log.warning("record_score.failed", backend=_BACKEND, name=name, error=str(exc))
 
 
+def record_generation(
+    *,
+    name: str,
+    model: str,
+    input: Any,
+    output: str,
+    usage: dict | None = None,
+    metadata: dict | None = None,
+) -> None:
+    """Zaloguj pojedynczą "generację" (koszt/tokeny) do backendu obserwowalności.
+
+    Dla wywołań wykonywanych POZA LiteLLM — np. surowym SDK Anthropic z web
+    search / prompt caching / streamingiem — gdzie automatyczny callback
+    LiteLLM nie zadziała. Przekaż `usage` w formie {"input": tokeny_wejscia,
+    "output": tokeny_wyjscia}; backend policzy koszt na podstawie `model`.
+
+    Best-effort — nie rzuca wyjątków, żeby telemetria nigdy nie wywaliła apki.
+    """
+    try:
+        if _BACKEND == "langfuse":
+            from langfuse import Langfuse
+
+            lf = Langfuse()
+            lf_usage = None
+            if usage:
+                lf_usage = {
+                    "input": usage.get("input"),
+                    "output": usage.get("output"),
+                    "unit": "TOKENS",
+                }
+            lf.generation(
+                name=name,
+                model=model,
+                input=input,
+                output=output,
+                usage=lf_usage,
+                metadata=metadata,
+            )
+        elif _BACKEND == "opik":
+            from opik import Opik
+
+            client = Opik()
+            trace = client.trace(name=name, input={"prompt": input}, output={"completion": output},
+                                 metadata=metadata)
+            trace.span(
+                name=name,
+                type="llm",
+                model=model,
+                input={"prompt": input},
+                output={"completion": output},
+                usage=usage,
+            )
+    except Exception as exc:
+        log.warning("record_generation.failed", backend=_BACKEND, name=name, error=str(exc))
+
+
 init_observability()
