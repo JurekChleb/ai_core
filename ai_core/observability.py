@@ -213,6 +213,23 @@ def _langfuse_client() -> Any:
     return Langfuse()
 
 
+def _current_trace_id(client: Any) -> str | None:
+    """Id trace'u, w którym właśnie jesteśmy — albo None poza kontekstem.
+
+    Uwaga: score_current_trace() wygląda na przeznaczone dokładnie do tego,
+    ale w 4.x nie zapisuje oceny. Pobranie id i przekazanie go jawnie do
+    create_score() jest jedyną drogą, która faktycznie działa.
+    """
+    getter = getattr(client, "get_current_trace_id", None)
+    if getter is None:
+        return None
+    try:
+        return getter()
+    except Exception as exc:
+        log.warning("record_score.trace_id_unavailable", error=str(exc))
+        return None
+
+
 def record_score(
     *, name: str, value: float, trace_id: str | None = None, comment: str = ""
 ) -> None:
@@ -224,6 +241,12 @@ def record_score(
     API Langfuse zmieniło nazwę tej operacji w 3.x (score -> create_score),
     dlatego wybieramy ją po realnych możliwościach klienta, a nie po numerze
     wersji — sam numer nie mówi, co pakiet faktycznie wystawia.
+
+    W 3.x/4.x ocena MUSI wskazywać istniejący trace. Bez tego create_score()
+    kolejkuje żądanie, wraca bez wyjątku, a serwer odrzuca je dopiero przy
+    flushu — czyli ocena przepada mimo braku błędu po stronie klienta. Gdy
+    wywołujący nie poda trace_id, bierzemy go z aktywnego kontekstu; gdy
+    kontekstu nie ma, mówimy o tym wprost zamiast wysyłać w próżnię.
     """
     try:
         if _BACKEND == "langfuse":
@@ -231,7 +254,18 @@ def record_score(
             if hasattr(client, "score"):  # langfuse 2.x
                 client.score(name=name, value=value, comment=comment, trace_id=trace_id)
             elif hasattr(client, "create_score"):  # langfuse 3.x / 4.x
-                client.create_score(name=name, value=value, comment=comment, trace_id=trace_id)
+                target = trace_id or _current_trace_id(client)
+                if not target:
+                    log.error(
+                        "record_score.no_trace",
+                        name=name,
+                        hint="brak trace_id i brak aktywnego trace'u — ocena "
+                        "PRZEPADA; wywołaj wewnątrz @traced albo podaj trace_id",
+                    )
+                    return
+                client.create_score(
+                    name=name, value=value, comment=comment, trace_id=target
+                )
             else:
                 log.error(
                     "record_score.unsupported_langfuse",
