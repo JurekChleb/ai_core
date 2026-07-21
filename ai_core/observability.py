@@ -28,6 +28,41 @@ def _set_provider_keys() -> None:
     os.environ.setdefault("OLLAMA_API_BASE", settings.local_api_base)
 
 
+def _warn_if_langfuse_incompatible() -> None:
+    """Sprawdź przy starcie, czy zainstalowany Langfuse umie to, czego używamy.
+
+    Bez tego niezgodna wersja objawia się dopiero jako brak ocen w dashboardzie
+    — przy działającej aplikacji i czystych logach. Lepiej powiedzieć to raz,
+    głośno, w momencie startu.
+    """
+    try:
+        import langfuse
+
+        from langfuse import Langfuse  # noqa: F401
+
+        version = getattr(langfuse, "__version__", "?")
+        missing = []
+        if not (hasattr(Langfuse, "score") or hasattr(Langfuse, "create_score")):
+            missing.append("score/create_score")
+        if not (hasattr(Langfuse, "generation") or hasattr(Langfuse, "start_observation")):
+            missing.append("generation/start_observation")
+        if missing:
+            log.error(
+                "observability.langfuse_incompatible",
+                version=version,
+                missing=missing,
+                hint="oceny i generacje NIE beda zapisywane; sprawdz wersje langfuse",
+            )
+        else:
+            log.debug("observability.langfuse_compatible", version=version)
+    except ImportError:
+        log.error(
+            "observability.langfuse_missing",
+            hint="backend=langfuse, ale pakiet nie jest zainstalowany "
+            "(pip install 'ai-core[langfuse]')",
+        )
+
+
 def init_observability() -> None:
     """Ustaw callback LiteLLM + env dla wybranego backendu. Wołane raz przy imporcie."""
     _set_provider_keys()
@@ -41,6 +76,7 @@ def init_observability() -> None:
         litellm.success_callback = ["langfuse"]
         litellm.failure_callback = ["langfuse"]
         log.info("observability.init", backend="langfuse", host=settings.langfuse_host)
+        _warn_if_langfuse_incompatible()
 
     elif _BACKEND == "opik":
         if settings.opik_api_key:
@@ -112,6 +148,13 @@ def traced(name: str | None = None) -> Callable:
     return decorator
 
 
+def _langfuse_client() -> Any:
+    """Klient Langfuse. Osobno, żeby obie funkcje niżej miały jedno źródło."""
+    from langfuse import Langfuse
+
+    return Langfuse()
+
+
 def record_score(
     *, name: str, value: float, trace_id: str | None = None, comment: str = ""
 ) -> None:
@@ -119,12 +162,24 @@ def record_score(
 
     Nie rzuca wyjątków — jeśli backend/wersja nie wspiera API, tylko loguje.
     Powiąż wynik z konkretnym zapytaniem przez trace_id (jeśli masz).
+
+    API Langfuse zmieniło nazwę tej operacji w 3.x (score -> create_score),
+    dlatego wybieramy ją po realnych możliwościach klienta, a nie po numerze
+    wersji — sam numer nie mówi, co pakiet faktycznie wystawia.
     """
     try:
         if _BACKEND == "langfuse":
-            from langfuse import Langfuse
-
-            Langfuse().score(name=name, value=value, comment=comment, trace_id=trace_id)
+            client = _langfuse_client()
+            if hasattr(client, "score"):  # langfuse 2.x
+                client.score(name=name, value=value, comment=comment, trace_id=trace_id)
+            elif hasattr(client, "create_score"):  # langfuse 3.x / 4.x
+                client.create_score(name=name, value=value, comment=comment, trace_id=trace_id)
+            else:
+                log.error(
+                    "record_score.unsupported_langfuse",
+                    hint="klient nie ma ani score(), ani create_score() — ocena PRZEPADA",
+                )
+                return
         elif _BACKEND == "opik":
             from opik import Opik
 
@@ -134,7 +189,9 @@ def record_score(
                     [{"id": trace_id, "name": name, "value": value, "reason": comment}]
                 )
     except Exception as exc:
-        log.warning("record_score.failed", backend=_BACKEND, name=name, error=str(exc))
+        # error, nie warning: cicho przepadająca ocena wygląda jak działająca
+        # integracja i potrafi zostać niezauważona tygodniami.
+        log.error("record_score.failed", backend=_BACKEND, name=name, error=str(exc))
 
 
 def record_generation(
@@ -157,24 +214,48 @@ def record_generation(
     """
     try:
         if _BACKEND == "langfuse":
-            from langfuse import Langfuse
+            lf = _langfuse_client()
 
-            lf = Langfuse()
-            lf_usage = None
-            if usage:
-                lf_usage = {
-                    "input": usage.get("input"),
-                    "output": usage.get("output"),
-                    "unit": "TOKENS",
-                }
-            lf.generation(
-                name=name,
-                model=model,
-                input=input,
-                output=output,
-                usage=lf_usage,
-                metadata=metadata,
-            )
+            if hasattr(lf, "generation"):  # langfuse 2.x
+                lf_usage = None
+                if usage:
+                    lf_usage = {
+                        "input": usage.get("input"),
+                        "output": usage.get("output"),
+                        "unit": "TOKENS",
+                    }
+                lf.generation(
+                    name=name,
+                    model=model,
+                    input=input,
+                    output=output,
+                    usage=lf_usage,
+                    metadata=metadata,
+                )
+            elif hasattr(lf, "start_observation"):  # langfuse 3.x / 4.x
+                # 3.x przeszło na model OTel: generacja to obserwacja, którą
+                # trzeba domknąć, żeby została wysłana.
+                generation = lf.start_observation(
+                    name=name,
+                    as_type="generation",
+                    model=model,
+                    input=input,
+                    output=output,
+                    usage_details={
+                        "input": usage.get("input"),
+                        "output": usage.get("output"),
+                    }
+                    if usage
+                    else None,
+                    metadata=metadata,
+                )
+                generation.end()
+            else:
+                log.error(
+                    "record_generation.unsupported_langfuse",
+                    hint="brak generation() i start_observation() — generacja PRZEPADA",
+                )
+                return
         elif _BACKEND == "opik":
             from opik import Opik
 
@@ -190,7 +271,7 @@ def record_generation(
                 usage=usage,
             )
     except Exception as exc:
-        log.warning("record_generation.failed", backend=_BACKEND, name=name, error=str(exc))
+        log.error("record_generation.failed", backend=_BACKEND, name=name, error=str(exc))
 
 
 init_observability()
