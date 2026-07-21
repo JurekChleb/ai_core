@@ -19,6 +19,10 @@ class Settings(BaseSettings):
     openai_api_key: str | None = None
     anthropic_api_key: str | None = None
     local_api_base: str = "http://localhost:11434"  # Ollama / kompatybilne
+    # Wlasny endpoint zgodny z OpenAI (firmowe proxy/gateway). Bez tego
+    # kazde wywolanie idzie na api.openai.com — projekt za brama dostanie
+    # 401 albo, gorzej, cicho ominie wlasna bramke.
+    openai_base_url: str | None = None
 
     # --- wybór backendu obserwowalności (jedna zmienna env) ---
     observability_backend: Literal["langfuse", "opik", "none"] = "langfuse"

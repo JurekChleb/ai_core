@@ -15,7 +15,7 @@ from .evals import EvalResult, Evaluator, Groundedness, JsonFormat, NonEmpty
 from .metadata import RequestMeta
 from .observability import record_generation, record_score, traced
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 
 __all__ = [
     "LLM",

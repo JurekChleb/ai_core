@@ -1,6 +1,6 @@
 [project]
 name = "ai-core"
-version = "0.2.0"
+version = "0.3.0"
 description = "Wspólna biblioteka AI: LiteLLM + obserwowalność (Langfuse/Opik) + evaluatory"
 requires-python = ">=3.11"
 dependencies = [
@@ -12,6 +12,9 @@ dependencies = [
 [project.optional-dependencies]
 langfuse = ["langfuse>=2.50"]
 opik = ["opik>=1.3"]
+# Tracing LangChain/LangGraph (ai_core.langchain): wymaga SDK 3.x+, bo
+# opiera sie na create_trace_id() i langfuse.langchain.
+langchain = ["langfuse>=3", "langchain-core>=0.3"]
 dev = ["pytest>=8.0", "pytest-asyncio>=0.23", "ruff>=0.6", "mypy>=1.10"]
 all = ["langfuse>=2.50", "opik>=1.3"]
 

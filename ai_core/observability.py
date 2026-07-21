@@ -23,9 +23,60 @@ def _set_provider_keys() -> None:
     """Udostępnij klucze providerów LiteLLM przez env (jeśli podane w configu)."""
     if settings.openai_api_key:
         os.environ.setdefault("OPENAI_API_KEY", settings.openai_api_key)
+    if settings.openai_base_url:
+        # LiteLLM rozwiazuje endpoint z OPENAI_BASE_URL (w drugiej
+        # kolejnosci OPENAI_API_BASE) — bez tego projekt za firmowa
+        # brama i tak poleci na api.openai.com.
+        os.environ.setdefault("OPENAI_BASE_URL", settings.openai_base_url)
     if settings.anthropic_api_key:
         os.environ.setdefault("ANTHROPIC_API_KEY", settings.anthropic_api_key)
     os.environ.setdefault("OLLAMA_API_BASE", settings.local_api_base)
+
+
+def _langfuse_major() -> int | None:
+    """Główny numer wersji zainstalowanego Langfuse, albo None."""
+    try:
+        import langfuse
+
+        return int(str(getattr(langfuse, "__version__", "")).split(".")[0])
+    except (ImportError, ValueError, IndexError):
+        return None
+
+
+def _litellm_langfuse_callback() -> str | None:
+    """Nazwa callbacku LiteLLM pasujaca do zainstalowanego Langfuse.
+
+    LiteLLM ma dwie integracje: "langfuse" (SDK 2.x) i "langfuse_otel"
+    (SDK 3.x+). Wpiecie starej pod nowym SDK wywala sie na
+    langfuse.version.__version__ przy PIERWSZYM wywolaniu modelu — czyli
+    psuje generowanie, nie tylko telemetrie.
+
+    Zwraca None, gdy nie da sie dobrac bezpiecznie: wtedy lepiej stracic
+    automatyczny trace wywolan LiteLLM niz wywolania jako takie.
+    Ewaluacja i record_score dzialaja niezaleznie od tego.
+    """
+    major = _langfuse_major()
+    if major is None:
+        return None
+    if major < 3:
+        return "langfuse"
+
+    try:
+        import litellm
+
+        known = set(getattr(litellm, "_known_custom_logger_compatible_callbacks", []) or [])
+        if "langfuse_otel" in known:
+            return "langfuse_otel"
+    except ImportError:
+        pass
+
+    log.warning(
+        "observability.litellm_langfuse_callback_off",
+        langfuse_major=major,
+        hint="ta wersja LiteLLM nie zna langfuse_otel; auto-trace wywolan "
+        "LiteLLM wylaczony, oceny i tak beda zapisywane",
+    )
+    return None
 
 
 def _warn_if_langfuse_incompatible() -> None:
@@ -73,9 +124,16 @@ def init_observability() -> None:
         if settings.langfuse_secret_key:
             os.environ.setdefault("LANGFUSE_SECRET_KEY", settings.langfuse_secret_key)
         os.environ.setdefault("LANGFUSE_HOST", settings.langfuse_host)
-        litellm.success_callback = ["langfuse"]
-        litellm.failure_callback = ["langfuse"]
-        log.info("observability.init", backend="langfuse", host=settings.langfuse_host)
+        callback = _litellm_langfuse_callback()
+        if callback:
+            litellm.success_callback = [callback]
+            litellm.failure_callback = [callback]
+        log.info(
+            "observability.init",
+            backend="langfuse",
+            host=settings.langfuse_host,
+            litellm_callback=callback or "wylaczony",
+        )
         _warn_if_langfuse_incompatible()
 
     elif _BACKEND == "opik":
